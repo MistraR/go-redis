@@ -1,5 +1,9 @@
 package tcp
 
+/**
+ * A echo handler to test whether the handler is functioning normally
+ */
+
 import (
 	"bufio"
 	"context"
@@ -12,61 +16,70 @@ import (
 	"time"
 )
 
-type EchoClient struct {
-	Conn    net.Conn
-	Waiting wait.Wait
-}
-
-func (e *EchoClient) Close() error {
-	e.Waiting.WaitWithTimeout(10 * time.Second)
-	_ = e.Conn.Close()
-	return nil
-}
-
+// EchoHandler echos received line to client, using for test
 type EchoHandler struct {
 	activeConn sync.Map
 	closing    atomic.Boolean
 }
 
+// MakeEchoHandler creates EchoHandler
 func MakeHandler() *EchoHandler {
 	return &EchoHandler{}
 }
 
-func (handler *EchoHandler) Handle(ctx context.Context, conn net.Conn) {
-	if handler.closing.Get() {
+// EchoClient is client for EchoHandler, using for test
+type EchoClient struct {
+	Conn    net.Conn
+	Waiting wait.Wait
+}
+
+// Close close connection
+func (c *EchoClient) Close() error {
+	c.Waiting.WaitWithTimeout(10 * time.Second)
+	c.Conn.Close()
+	return nil
+}
+
+// Handle echos received line to client
+func (h *EchoHandler) Handle(ctx context.Context, conn net.Conn) {
+	if h.closing.Get() {
+		// closing handler refuse new connection
 		_ = conn.Close()
 	}
+
 	client := &EchoClient{
-		Conn:    conn,
-		Waiting: wait.Wait{},
+		Conn: conn,
 	}
-	handler.activeConn.Store(client, struct{}{}) //store并发方法 v=空接结构体 等价于hashset
+	h.activeConn.Store(client, struct{}{})
+
 	reader := bufio.NewReader(conn)
-	for true {
-		msg, err := reader.ReadString('\n') //一条完整消息以\n分割，拆包粘包问题
+	for {
+		// may occurs: client EOF, client timeout, handler early close
+		msg, err := reader.ReadString('\n')
 		if err != nil {
-			if err == io.EOF { //客户端中断了连接
-				logger.Info("Client Connect close")
-				handler.activeConn.Delete(client)
+			if err == io.EOF {
+				logger.Info("connection close")
+				h.activeConn.Delete(client)
 			} else {
 				logger.Warn(err)
 			}
 			return
 		}
-		client.Waiting.Add(1) //+1 表示自己正在处理业务，不要关闭当前连接
+		client.Waiting.Add(1)
 		b := []byte(msg)
-		_, _ = conn.Write(b)  //回写数据
-		client.Waiting.Done() //-1
+		_, _ = conn.Write(b)
+		client.Waiting.Done()
 	}
 }
 
-func (handler *EchoHandler) Close() error {
-	logger.Info("handler shutting down")
-	handler.closing.Set(true)
-	handler.activeConn.Range(func(key, value any) bool { //遍历map
+// Close stops echo handler
+func (h *EchoHandler) Close() error {
+	logger.Info("handler shutting down...")
+	h.closing.Set(true)
+	h.activeConn.Range(func(key interface{}, val interface{}) bool {
 		client := key.(*EchoClient)
-		_ = client.Conn.Close()
-		return true //true 继续处理map中的下一个元素
+		_ = client.Close()
+		return true
 	})
 	return nil
 }
